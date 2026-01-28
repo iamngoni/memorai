@@ -144,18 +144,10 @@ pub async fn count_memories(db: &Db) -> Result<usize> {
 }
 
 pub async fn get_all_texts(db: &Db) -> Result<Vec<String>> {
-    let mut result = db
-        .query("SELECT text FROM memory ORDER BY created_at DESC LIMIT 100")
-        .await
-        .context("Failed to fetch texts")?;
-
-    #[derive(serde::Deserialize)]
-    struct TextOnly {
-        text: String,
-    }
-
-    let texts: Vec<TextOnly> = result.take(0).context("Failed to parse texts")?;
-    Ok(texts.into_iter().map(|t| t.text).collect())
+    let memories = get_all_memories(db).await?;
+    let mut texts: Vec<String> = memories.into_iter().map(|m| m.text).collect();
+    texts.truncate(100);
+    Ok(texts)
 }
 
 pub async fn get_tag_counts(db: &Db) -> Result<Vec<(String, usize)>> {
