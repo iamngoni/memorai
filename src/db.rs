@@ -125,14 +125,14 @@ pub async fn get_memories_paginated(
 }
 
 pub async fn delete_memory(db: &Db, id: &str) -> Result<Option<Memory>> {
-    let thing = format!("memory:{}", id);
-    let memory: Option<Memory> = db
-        .delete((&"memory", id))
+    let mut result = db
+        .query("DELETE FROM memory WHERE id = $id RETURN BEFORE")
+        .bind(("id", format!("memory:{}", id)))
         .await
         .context("Failed to delete memory")?;
 
-    let _ = thing; // suppress warning
-    Ok(memory)
+    let deleted: Vec<Memory> = result.take(0).unwrap_or_default();
+    Ok(deleted.into_iter().next())
 }
 
 pub async fn count_memories(db: &Db) -> Result<usize> {
