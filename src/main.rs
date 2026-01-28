@@ -78,14 +78,13 @@ async fn serve(config: Config) -> Result<()> {
     let port = config.port;
     let embeddings = EmbeddingClient::new(&config);
 
-    let state = Arc::new(server::AppState {
+    let state = Arc::new(tokio::sync::RwLock::new(server::AppState {
         db,
         config,
         embeddings,
-    });
+    }));
 
-    let app = server::create_router(state);
-    let addr = format!("0.0.0.0:{}", port);
+    let shared_state = actix_web::web::Data::new(state);
 
     println!(
         r#"
@@ -102,9 +101,19 @@ async fn serve(config: Config) -> Result<()> {
         port
     );
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("Listening on {}", addr);
-    axum::serve(listener, app).await?;
+    tracing::info!("Listening on 0.0.0.0:{}", port);
+
+    actix_web::HttpServer::new(move || {
+        actix_web::App::new()
+            .app_data(shared_state.clone())
+            .wrap(actix_cors::Cors::permissive())
+            .service(server::api_scope())
+            .service(server::health_route())
+    })
+    .bind(format!("0.0.0.0:{}", port))?
+    .run()
+    .await?;
+
     Ok(())
 }
 

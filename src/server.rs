@@ -1,12 +1,6 @@
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::Json,
-    routing::{delete, get, post},
-    Router,
-};
+use actix_web::{web, HttpResponse, Scope};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::db::{self, Db};
@@ -20,67 +14,66 @@ pub struct AppState {
     pub embeddings: EmbeddingClient,
 }
 
-pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/v1/memories", post(create_memory))
-        .route("/v1/memories", get(list_memories))
-        .route("/v1/memories/bulk", post(bulk_create))
-        .route("/v1/memories/{id}", delete(delete_memory))
-        .route("/v1/search", get(search))
-        .route("/v1/stats", get(stats))
-        .route("/v1/profile", get(get_profile))
-        .route("/health", get(health))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+pub type SharedState = web::Data<Arc<RwLock<AppState>>>;
+
+pub fn api_scope() -> Scope {
+    web::scope("/v1")
+        .route("/memories", web::post().to(create_memory))
+        .route("/memories", web::get().to(list_memories))
+        .route("/memories/bulk", web::post().to(bulk_create))
+        .route("/memories/{id}", web::delete().to(delete_memory))
+        .route("/search", web::get().to(search))
+        .route("/stats", web::get().to(stats))
+        .route("/profile", web::get().to(get_profile))
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status": "ok", "service": "memorai"}))
+pub fn health_route() -> actix_web::Resource {
+    web::resource("/health").route(web::get().to(health))
+}
+
+async fn health() -> HttpResponse {
+    HttpResponse::Ok().json(serde_json::json!({"status": "ok", "service": "memorai"}))
 }
 
 async fn create_memory(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateMemoryRequest>,
-) -> (StatusCode, Json<ApiResponse<MemoryResponse>>) {
+    state: SharedState,
+    body: web::Json<CreateMemoryRequest>,
+) -> HttpResponse {
+    let req = body.into_inner();
+
     if req.text.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("Text cannot be empty")),
-        );
+        return HttpResponse::BadRequest().json(ApiResponse::<()>::error("Text cannot be empty"));
     }
+
+    let state = state.read().await;
 
     let embedding = match state.embeddings.embed(&req.text).await {
         Ok(e) => e,
         Err(err) => {
             tracing::error!("Embedding failed: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Embedding failed: {}", err))),
-            );
+            return HttpResponse::InternalServerError()
+                .json(ApiResponse::<()>::error(format!("Embedding failed: {}", err)));
         }
     };
 
     match db::create_memory(&state.db, req.text, req.tags, req.source, embedding).await {
-        Ok(memory) => (
-            StatusCode::CREATED,
-            Json(ApiResponse::success(MemoryResponse::from_memory(memory))),
-        ),
+        Ok(memory) => HttpResponse::Created()
+            .json(ApiResponse::success(MemoryResponse::from_memory(memory))),
         Err(err) => {
             tracing::error!("Failed to create memory: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to create memory: {}", err))),
-            )
+            HttpResponse::InternalServerError()
+                .json(ApiResponse::<()>::error(format!("Failed to create memory: {}", err)))
         }
     }
 }
 
 async fn list_memories(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ListQuery>,
-) -> (StatusCode, Json<ApiResponse<Vec<MemoryResponse>>>) {
+    state: SharedState,
+    query: web::Query<ListQuery>,
+) -> HttpResponse {
     let page = query.page.unwrap_or(1);
     let per_page = query.per_page.unwrap_or(20).min(100);
+    let state = state.read().await;
 
     match db::get_memories_paginated(
         &state.db,
@@ -94,67 +87,57 @@ async fn list_memories(
         Ok(memories) => {
             let responses: Vec<MemoryResponse> =
                 memories.into_iter().map(MemoryResponse::from_memory).collect();
-            (StatusCode::OK, Json(ApiResponse::success(responses)))
+            HttpResponse::Ok().json(ApiResponse::success(responses))
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to list memories: {}", err))),
-        ),
+        Err(err) => HttpResponse::InternalServerError()
+            .json(ApiResponse::<()>::error(format!("Failed to list memories: {}", err))),
     }
 }
 
 async fn delete_memory(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
+    state: SharedState,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    let state = state.read().await;
+
     match db::delete_memory(&state.db, &id).await {
-        Ok(Some(_)) => (
-            StatusCode::OK,
-            Json(ApiResponse::success("Memory deleted".to_string())),
-        ),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Memory not found")),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to delete memory: {}", err))),
-        ),
+        Ok(Some(_)) => {
+            HttpResponse::Ok().json(ApiResponse::success("Memory deleted".to_string()))
+        }
+        Ok(None) => {
+            HttpResponse::NotFound().json(ApiResponse::<()>::error("Memory not found"))
+        }
+        Err(err) => HttpResponse::InternalServerError()
+            .json(ApiResponse::<()>::error(format!("Failed to delete memory: {}", err))),
     }
 }
 
 async fn search(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<SearchQuery>,
-) -> (StatusCode, Json<ApiResponse<Vec<SearchResult>>>) {
+    state: SharedState,
+    query: web::Query<SearchQuery>,
+) -> HttpResponse {
     if query.q.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("Query cannot be empty")),
-        );
+        return HttpResponse::BadRequest()
+            .json(ApiResponse::<()>::error("Query cannot be empty"));
     }
 
     let limit = query.limit.unwrap_or(5).min(50);
+    let state = state.read().await;
 
-    // Embed the query
     let query_embedding = match state.embeddings.embed(&query.q).await {
         Ok(e) => e,
         Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Embedding failed: {}", err))),
-            );
+            return HttpResponse::InternalServerError()
+                .json(ApiResponse::<()>::error(format!("Embedding failed: {}", err)));
         }
     };
 
-    // Get all memories and compute similarity
     let memories = match db::get_all_memories(&state.db).await {
         Ok(m) => m,
         Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to fetch memories: {}", err))),
-            );
+            return HttpResponse::InternalServerError()
+                .json(ApiResponse::<()>::error(format!("Failed to fetch memories: {}", err)));
         }
     };
 
@@ -169,23 +152,20 @@ async fn search(
         })
         .collect();
 
-    // Sort by score descending
     scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
 
-    (StatusCode::OK, Json(ApiResponse::success(scored)))
+    HttpResponse::Ok().json(ApiResponse::success(scored))
 }
 
-async fn stats(
-    State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<ApiResponse<StatsResponse>>) {
+async fn stats(state: SharedState) -> HttpResponse {
+    let state = state.read().await;
+
     let total = match db::count_memories(&state.db).await {
         Ok(c) => c,
         Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to get stats: {}", err))),
-            );
+            return HttpResponse::InternalServerError()
+                .json(ApiResponse::<()>::error(format!("Failed to get stats: {}", err)));
         }
     };
 
@@ -204,31 +184,30 @@ async fn stats(
             .collect(),
     };
 
-    (StatusCode::OK, Json(ApiResponse::success(response)))
+    HttpResponse::Ok().json(ApiResponse::success(response))
 }
 
-async fn get_profile(
-    State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<ApiResponse<ProfileResponse>>) {
+async fn get_profile(state: SharedState) -> HttpResponse {
+    let state = state.read().await;
+
     match profile::generate_profile(&state.db, &state.config).await {
-        Ok((profile_text, count)) => (
-            StatusCode::OK,
-            Json(ApiResponse::success(ProfileResponse {
+        Ok((profile_text, count)) => HttpResponse::Ok().json(ApiResponse::success(
+            ProfileResponse {
                 profile: profile_text,
                 memory_count: count,
-            })),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to generate profile: {}", err))),
-        ),
+            },
+        )),
+        Err(err) => HttpResponse::InternalServerError()
+            .json(ApiResponse::<()>::error(format!("Failed to generate profile: {}", err))),
     }
 }
 
 async fn bulk_create(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<BulkCreateRequest>,
-) -> (StatusCode, Json<ApiResponse<BulkResponse>>) {
+    state: SharedState,
+    body: web::Json<BulkCreateRequest>,
+) -> HttpResponse {
+    let req = body.into_inner();
+    let state = state.read().await;
     let mut created = 0;
     let mut failed = 0;
     let mut errors = Vec::new();
@@ -258,12 +237,9 @@ async fn bulk_create(
         }
     }
 
-    (
-        StatusCode::OK,
-        Json(ApiResponse::success(BulkResponse {
-            created,
-            failed,
-            errors,
-        })),
-    )
+    HttpResponse::Ok().json(ApiResponse::success(BulkResponse {
+        created,
+        failed,
+        errors,
+    }))
 }
