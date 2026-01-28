@@ -13,7 +13,11 @@ use config::Config;
 use embeddings::EmbeddingClient;
 
 #[derive(Parser)]
-#[command(name = "memorai", version, about = "Local-first AI memory system with semantic search")]
+#[command(
+    name = "memorai",
+    version,
+    about = "Local-first AI memory system with semantic search"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -115,6 +119,7 @@ async fn add_memory(
 
     println!("Generating embedding...");
     let embedding = embeddings.embed(&text).await?;
+    println!("Embedding generated 👌");
 
     let memory = db::create_memory(&db, text, tags, source, embedding).await?;
     let response = models::MemoryResponse::from_memory(memory);
