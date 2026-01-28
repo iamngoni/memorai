@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::Surreal;
 
@@ -51,22 +50,16 @@ pub async fn create_memory(
     source: Option<String>,
     embedding: Vec<f32>,
 ) -> Result<Memory> {
-    let now = Utc::now();
-
-    let memory: Option<Memory> = db
-        .create("memory")
-        .content(Memory {
-            id: None,
-            text,
-            tags,
-            source,
-            embedding,
-            created_at: now,
-            updated_at: now,
-        })
+    let mut result = db
+        .query("CREATE memory SET text = $text, tags = $tags, source = $source, embedding = $embedding, created_at = time::now(), updated_at = time::now()")
+        .bind(("text", text))
+        .bind(("tags", tags))
+        .bind(("source", source))
+        .bind(("embedding", embedding))
         .await
         .context("Failed to create memory")?;
 
+    let memory: Option<Memory> = result.take(0).context("Failed to parse created memory")?;
     memory.context("No memory returned after creation")
 }
 

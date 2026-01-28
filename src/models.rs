@@ -10,8 +10,8 @@ pub struct Memory {
     pub tags: Vec<String>,
     pub source: Option<String>,
     pub embedding: Vec<f32>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 // API request to create a memory
@@ -36,8 +36,8 @@ pub struct MemoryResponse {
     pub text: String,
     pub tags: Vec<String>,
     pub source: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 impl MemoryResponse {
